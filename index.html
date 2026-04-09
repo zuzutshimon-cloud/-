@@ -459,6 +459,7 @@ function setPC(n){
 }
 
 function startGame(){
+  MP.myIndex = 0; MP.isHost = false; MP.enabled = false;
   G={players:[],n:G.n,cur:0,pos:[],prog:[],sc:[],skip:[],immune:[],jc:0,wf:false,diced:false,cbk:null,won:false};
   for(let i=0;i<G.n;i++){
     const v=document.getElementById(`pn-${i}`)?.value?.trim()||DNAMES[i];
@@ -1344,6 +1345,7 @@ function hostStartGame() {
   });
   MP.myIndex = 0; // host is always player 0
   MP.myColor = G.players[0].color;
+  MP.enabled = true;
 
   const startMsg = {type:'start', players: MP.lobbyPlayers, state: serializeState()};
   Object.values(MP.conns).forEach(c => c.send(startMsg));
@@ -1448,43 +1450,46 @@ function renderRemoteCard(cd) {
   openMod();
 }
 
-// ── Override showCard to sync across peers ──
-const _origShowCard = showCard;
-function showCard(html_content, cb) {
-  MP.pendingCbk = cb;
+// ── MP: unified showCard (works for local + MP) ──
+// Patches the existing showCard/closeCd via wrapper — avoids hoisting conflicts
+const _mpShowCard = function(html_content, cb) {
+  G.cbk = cb;          // keep original G.cbk for local path
+  MP.pendingCbk = cb;  // also store for MP path
   document.getElementById('ev-inner').innerHTML = html_content;
   openMod();
   if(MP.isHost) broadcastCard({html: html_content});
-  // Disable buttons for non-current player
   if(MP.enabled && G.cur !== MP.myIndex) {
     setTimeout(() => {
       document.querySelectorAll('#ev-inner .btn-ans, #ev-inner .btn-cont, #ev-inner button')
         .forEach(b => { b.disabled = true; b.style.opacity = '.45'; });
     }, 50);
   }
-}
+};
 
-// ── Override closeCd for multiplayer ──
-const _origCloseCd = closeCd;
-function closeCd() {
+// ── MP: unified closeCd ──
+const _mpCloseCd = function() {
   if(MP.enabled && !MP.isHost) {
-    // Client tells host to close
     if(G.cur === MP.myIndex) sendAction({act:'closeCd'});
     return;
   }
-  // Host or local
   closeMod();
-  const f = MP.pendingCbk; MP.pendingCbk = null;
+  // Use G.cbk as primary (matches original), fallback to MP.pendingCbk
+  const f = G.cbk || MP.pendingCbk;
+  G.cbk = null; MP.pendingCbk = null;
   setTimeout(() => { if(f) f(); }, 300);
-}
+};
 
-// ── Override rollDice ──
-const _origRollDice = rollDice;
-function rollDice() {
+// ── MP: unified rollDice ──
+const _mpRollDice = function() {
   if(MP.enabled && G.cur !== MP.myIndex) { showNotif('⏳ לא התורך עכשיו'); return; }
   if(MP.enabled && !MP.isHost) { sendAction({act:'roll', pi:MP.myIndex}); return; }
   doRoll(G.cur);
-}
+};
+
+// Patch window globals so onclick="closeCd()" / onclick="rollDice()" use MP versions
+window.showCard = _mpShowCard;
+window.closeCd  = _mpCloseCd;
+window.rollDice = _mpRollDice;
 
 function doRoll(pi) {
   if(G.diced) return;
@@ -1506,8 +1511,8 @@ function doRoll(pi) {
   }, 75);
 }
 
-// ── Override ansQ ──
-function ansQ(btn, pi, ok, pts, pending) {
+// ── MP: patch ansQ via window ──
+window.ansQ = function(btn, pi, ok, pts, pending) {
   if(MP.enabled && !MP.isHost) {
     sendAction({act:'ansQ', pi, ok, pts, pending});
     return;
@@ -1532,8 +1537,8 @@ function resolveAnsQ(pi, ok, bonus, pts, pending) {
   }, 1700);
 }
 
-// ── Override ansPathQ ──
-function ansPathQ(btn, pi, ok, bonus, pts, pending) {
+// ── MP: patch ansPathQ via window ──
+window.ansPathQ = function(btn, pi, ok, bonus, pts, pending) {
   if(MP.enabled && !MP.isHost) {
     sendAction({act:'ansPathQ', pi, ok, bonus, pts, pending});
     return;
@@ -1558,8 +1563,8 @@ function resolveAnsPathQ(pi, ok, bonus, pts, pending) {
   }, 1700);
 }
 
-// ── Override choicePick ──
-function choicePick(pi, opt, pending) {
+// ── MP: patch choicePick via window ──
+window.choicePick = function(pi, opt, pending) {
   if(MP.enabled && !MP.isHost) {
     sendAction({act:'choicePick', pi, opt, pending});
     closeMod();
@@ -1591,9 +1596,9 @@ function resolveChoicePick(pi, opt, pending) {
   }, 300);
 }
 
-// ── Override nextTurn to broadcast ──
-const _origNextTurn = nextTurn;
-function nextTurn() {
+// ── MP: patch nextTurn via window ──
+const _origNextTurn = window.nextTurn; // save original
+window.nextTurn = function() {
   if(G.won) return;
   if(Math.max(...G.sc) >= 10) { trigWin(G.sc.indexOf(Math.max(...G.sc))); return; }
   G.diced = false; G.cur = (G.cur+1) % G.n;
@@ -1603,11 +1608,11 @@ function nextTurn() {
     broadcastState();
     broadcastNotif(`תורו של ${G.players[G.cur].name}! 🎲`);
   }
-}
+};
 
-// ── updateAction: show/hide roll button based on whose turn ──
-const _origUpdateAction = updateAction;
-function updateAction() {
+// ── MP: patch updateAction via window ──
+const _origUpdateAction = window.updateAction;
+window.updateAction = function() {
   const p = G.players[G.cur];
   const d = document.getElementById('cur-dot');
   d.style.backgroundColor = p.color;
