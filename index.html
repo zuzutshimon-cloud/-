@@ -1154,9 +1154,10 @@ function initPeer(then) {
     setTimeout(() => initPeer(then), 1500);
     return;
   }
-  const adj = ['אדיר','אמיץ','גדול','חזק','כביר','מהיר','נאמן','עצום'];
-  const nums = () => (Math.floor(Math.random()*900)+100).toString();
-  const shortCode = adj[~~(Math.random()*adj.length)] + nums();
+  // PeerJS IDs: only a-z, 0-9, hyphens allowed
+  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+  let shortCode = '';
+  for(let i=0;i<6;i++) shortCode += chars[~~(Math.random()*chars.length)];
 
   try {
     MP.peer = new Peer(shortCode, {debug: 0,
