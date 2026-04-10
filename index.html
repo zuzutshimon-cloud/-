@@ -1161,21 +1161,40 @@ function initPeer(then) {
   for(let i=0;i<6;i++) shortCode += chars[~~(Math.random()*chars.length)];
 
   try {
-    MP.peer = new Peer(shortCode, {debug: 0,
-      config: {iceServers:[
-        {urls:'stun:stun.l.google.com:19302'},
-        {urls:'stun:global.stun.twilio.com:3478'}
-      ]}
-    });
-    MP.peer.on('open', id => { MP.myId = id; if(then) then(id); });
+    // Use explicit PeerJS cloud server settings for reliability
+    const peerOpts = {
+      debug: 0,
+      host: '0.peerjs.com',
+      port: 443,
+      path: '/',
+      secure: true,
+      config: {
+        iceServers:[
+          {urls:'stun:stun.l.google.com:19302'},
+          {urls:'stun:stun1.l.google.com:19302'},
+          {urls:'stun:global.stun.twilio.com:3478'}
+        ]
+      }
+    };
+    MP.peer = new Peer(shortCode, peerOpts);
+    MP.peer.on('open', id => { MP.myId = id; console.log('Peer open:', id); if(then) then(id); });
     MP.peer.on('error', e => {
-      console.error('PeerJS error:', e);
+      console.error('PeerJS error:', e.type, e);
       if(e.type === 'unavailable-id') {
-        // ID taken, retry with new one
         MP.peer.destroy();
         initPeer(then);
+      } else if(e.type === 'peer-unavailable') {
+        showLobbyStatus('❌ קוד חדר לא נמצא — בדוק שהמארח מחובר ונסה שוב');
+      } else if(e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') {
+        showLobbyStatus('❌ בעיית רשת — בדוק חיבור אינטרנט ורענן');
       } else {
-        showLobbyStatus('❌ שגיאת חיבור: ' + e.type + ' — בדוק חיבור אינטרנט');
+        showLobbyStatus('❌ שגיאה: ' + e.type);
+      }
+    });
+    MP.peer.on('disconnected', () => {
+      if(!G.won) {
+        console.log('Peer disconnected, reconnecting...');
+        MP.peer.reconnect();
       }
     });
   } catch(err) {
@@ -1211,6 +1230,7 @@ function createRoom() {
 
     // Listen for incoming connections
     MP.peer.on('connection', conn => {
+      conn.options = conn.options || {};
       conn.on('open', () => {
         MP.conns[conn.peer] = conn;
         conn.on('data', data => handleClientMsg(conn.peer, data));
@@ -1244,18 +1264,50 @@ function joinRoom() {
 
   initPeer(myId => {
     MP.myId = myId;
-    const conn = MP.peer.connect(code, {reliable: true});
-    MP.hostConn = conn;
-    conn.on('open', () => {
-      showLobbyStatus('✅ מחובר! ממתין למארח...');
-      conn.send({type:'join', name, id: myId});
-      document.getElementById('lb-name-step').style.display = 'none';
-      document.getElementById('lb-waiting').style.display = 'block';
-      document.getElementById('lb-code').textContent = code;
-    });
-    conn.on('data', data => handleHostMsg(data));
-    conn.on('close', () => { showNotif('🔌 נותקת מהמארח'); });
-    conn.on('error', () => { showLobbyStatus('❌ לא ניתן להתחבר לחדר זה'); });
+    let joinAttempts = 0;
+    function attemptConnect() {
+      joinAttempts++;
+      showLobbyStatus(`🔄 מתחבר... (ניסיון ${joinAttempts})`);
+      const conn = MP.peer.connect(code, {reliable: true, serialization: 'json'});
+      MP.hostConn = conn;
+      let opened = false;
+      const timeout = setTimeout(() => {
+        if(!opened) {
+          conn.close();
+          if(joinAttempts < 3) {
+            showLobbyStatus(`⏳ לא ניתן להתחבר, מנסה שוב...`);
+            setTimeout(attemptConnect, 1200);
+          } else {
+            showLobbyStatus('❌ קוד חדר לא נמצא — ודא שהמארח פתח משחק ושהקוד נכון');
+            MP.enabled = false;
+            document.getElementById('lb-name-step').style.display = 'block';
+            document.getElementById('lb-waiting').style.display = 'none';
+          }
+        }
+      }, 6000);
+      conn.on('open', () => {
+        opened = true;
+        clearTimeout(timeout);
+        showLobbyStatus('✅ מחובר! ממתין למארח...');
+        conn.send({type:'join', name, id: myId});
+        document.getElementById('lb-name-step').style.display = 'none';
+        document.getElementById('lb-waiting').style.display = 'block';
+        document.getElementById('lb-code').textContent = code;
+      });
+      conn.on('data', data => handleHostMsg(data));
+      conn.on('close', () => {
+        clearTimeout(timeout);
+        if(opened) showNotif('🔌 נותקת מהמארח');
+      });
+      conn.on('error', e => {
+        clearTimeout(timeout);
+        console.error('conn error', e);
+        if(joinAttempts < 3) setTimeout(attemptConnect, 1200);
+        else showLobbyStatus('❌ שגיאת חיבור — נסה שוב');
+      });
+    }
+    // Wait briefly for peer to register on server before connecting
+    setTimeout(attemptConnect, 800);
   });
 }
 
